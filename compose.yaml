@@ -1,0 +1,13 @@
+services:
+  invoices:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      APP_PASSWORD: ${APP_PASSWORD:?Please set APP_PASSWORD in .env}
+      DATA_DIR: /data
+    volumes:
+      - invoice-data:/data
+    restart: unless-stopped
+volumes:
+  invoice-data:
