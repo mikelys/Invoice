@@ -5,7 +5,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py ocr.py ./
 COPY static ./static
-RUN useradd --create-home invoice && mkdir /data && chown invoice:invoice /data
+RUN chmod -R a+rX /app && useradd --create-home invoice && mkdir /data && chown invoice:invoice /data
 USER invoice
 ENV DATA_DIR=/data
 EXPOSE 8000
