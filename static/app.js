@@ -58,11 +58,11 @@ function renderTable() {
   page = Math.min(page,Math.max(1,Math.ceil(rows.length/pageSize)));
   $('#table-count').textContent = rows.length;
   const slice = rows.slice((page-1)*pageSize,page*pageSize);
-  $('#invoice-rows').innerHTML = slice.map(row=>`<tr><td><div class="merchant-cell"><span class="merchant-icon">${icon('receipt')}</span><div><div class="merchant-name" title="${esc(row.vendor)}">${esc(row.vendor || row.file_name || '未填写商户')}</div><div class="merchant-number">${esc(row.number || '待补充发票号码')}</div></div></div></td><td>${esc(row.date || '待补充')}</td><td><span class="category-tag">${esc(row.category)}</span></td><td class="align-right amount">${esc(money(row.amount_cents,row.currency))}<small>${esc(row.currency)}</small></td><td><span class="status ${row.status==='confirmed'?'confirmed':''}">${row.status==='confirmed'?'已确认':'待核对'}</span></td><td><button class="edit-button" data-edit="${row.id}" aria-label="编辑 ${esc(row.vendor||'发票')}">${icon('edit')}</button></td></tr>`).join('');
+  $('#invoice-rows').innerHTML = slice.map(row=>`<tr><td><div class="merchant-cell"><span class="merchant-icon">${icon('receipt')}</span><div><button type="button" class="merchant-name merchant-review" data-edit="${row.id}" title="查看 / 核对 ${esc(row.vendor || '发票')}">${esc(row.vendor || row.file_name || '未填写商户')}</button><div class="merchant-number">${esc(row.number || '待补充发票号码')}</div></div></div></td><td>${esc(row.date || '待补充')}</td><td><span class="category-tag">${esc(row.category)}</span></td><td class="align-right amount">${esc(money(row.amount_cents,row.currency))}<small>${esc(row.currency)}</small></td><td><span class="status ${row.status==='confirmed'?'confirmed':''}">${row.status==='confirmed'?'已确认':'待核对'}</span></td><td><button class="button secondary" data-edit="${row.id}" aria-label="编辑 ${esc(row.vendor||'发票')}">${icon('edit')}查看 / 核对</button>${row.file_name ? `<a class="text-link" href="/api/files/${row.id}" target="_blank" rel="noopener">打开原件 ↗</a>` : ''}</td></tr>`).join('');
   $$('[data-edit]').forEach(button => button.onclick = () => openEditor(allRows.find(r=>r.id===button.dataset.edit)));
   $('#empty-state').hidden = rows.length > 0;
   $('#empty-state h3').textContent = allRows.length ? '没有符合条件的发票' : '让第一张发票，开启有序的一天';
-  $('#empty-state p').textContent = allRows.length ? '试试调整日期、币种、搜索词或筛选条件。' : '上传扫描件或手动录入，所有费用都会在这里整理好。';
+  $('#empty-state p').textContent = allRows.length ? '试试调整日期、搜索词或筛选条件。' : '上传扫描件或手动录入，所有费用都会在这里整理好。';
   $('#pagination-note').textContent = rows.length ? `显示 ${(page-1)*pageSize+1}–${Math.min(page*pageSize,rows.length)}，共 ${rows.length} 张发票` : '共 0 张发票';
   $('#page-number').textContent = page+' / '+Math.max(1,Math.ceil(rows.length/pageSize));
   $('#prev').disabled = page <= 1; $('#next').disabled = page*pageSize >= rows.length;
@@ -116,15 +116,19 @@ function openEditor(row = null) {
   $('#delete-invoice').hidden = !row;
   $('#ocr-text').textContent = row?.ocr_text || '暂无识别文本'; $('#ocr-error').textContent = row?.ocr_error || '';
   const hasFile = !!row?.file_name; $('#original-link').hidden = !hasFile;
+  $('#rerecognize').hidden = !hasFile; $('#rerecognize').disabled = row?.status === 'confirmed';
+  $('#preview-error').textContent = ''; $('#preview-note').textContent = '';
   if (hasFile) {
     const url='/api/files/'+row.id; $('#original-link').href=url;
-    $('#preview').innerHTML = row.file_name.toLowerCase().endsWith('.pdf') ? `<iframe title="发票原始 PDF" src="${url}"></iframe>` : `<img src="${url}" alt="发票原始扫描件">`;
+    $('#preview').innerHTML = `<a href="${url}" target="_blank" rel="noopener" aria-label="打开原始凭证"><img src="${url}/preview" alt="发票原始扫描件"></a>`;
+    $('#preview img').onerror = () => { $('#preview-error').textContent = '预览加载失败，请点击「打开原件」查看；若仍失败，请检查服务器的附件存储。'; };
+    $('#preview-note').textContent = row.file_name.toLowerCase().endsWith('.pdf') ? 'PDF 首页预览；点击「打开原件」可查看全部页面。' : '点击图片或「打开原件」可放大查看。';
   } else {$('#preview').textContent = '手动录入的发票暂无原始凭证'; $('#original-link').removeAttribute('href');}
   $('#editor').showModal();
 }
-let saving = false;
+let saving = false, recognizing = false;
 async function save(status) {
-  if(saving) return;
+  if(saving || recognizing) return;
   const data = Object.fromEntries(new FormData($('#invoice-form'))); data.status = status;
   $('#form-error').textContent = ''; saving = true;
   $('#confirm-invoice').disabled = $('#save-draft').disabled = true;
@@ -167,15 +171,39 @@ for(const evt of ['dragover','dragenter']) $('#drop-zone').addEventListener(evt,
 $('#drop-zone').ondragleave=()=>$('#drop-zone').classList.remove('dragging');
 $('#drop-zone').ondrop=e=>{e.preventDefault();$('#drop-zone').classList.remove('dragging');uploadFiles([...e.dataTransfer.files]);};
 $('#file-input').onchange=e=>uploadFiles([...e.target.files]);
-$('#manual').onclick=()=>openEditor(); $('#close-editor').onclick=()=>{if(!saving)$('#editor').close();};
+$('#manual').onclick=()=>openEditor(); $('#close-editor').onclick=()=>{if(!saving && !recognizing)$('#editor').close();};
 $('#invoice-form').onsubmit=e=>{e.preventDefault();save('confirmed');};
 $('#save-draft').onclick=()=>save('pending');
-$('#delete-invoice').onclick=()=>$('#delete-dialog').showModal();
+$('#delete-invoice').onclick=()=>{if(!recognizing && !saving)$('#delete-dialog').showModal();};
 $('#cancel-delete').onclick=()=>$('#delete-dialog').close();
 $('#confirm-delete').onclick=async()=>{
   $('#confirm-delete').disabled=true;
   try {await api('/api/invoices/'+editing.id,{method:'DELETE'});$('#delete-dialog').close();$('#editor').close();toast('发票已删除');await refresh();}catch(e){toast(e.message,true);}finally{$('#confirm-delete').disabled=false;}
 };
+$('#rerecognize').onclick = async () => {
+  if (!editing || recognizing || saving) return;
+  recognizing = true;
+  $('#rerecognize').disabled = $('#confirm-invoice').disabled = $('#save-draft').disabled = true;
+  $('#form-error').textContent = '正在重新识别，请稍候…';
+  const id = editing.id;
+  try {
+    const row = await api('/api/invoices/'+id+'/recognize', {method:'POST'});
+    // Keep unsaved edits in the form as well as fields already saved on the server.
+    for (const key of ['vendor','number','date','amount','purpose']) {
+      const field = $('#invoice-form').elements[key];
+      if (!field.value || (key === 'amount' && Number(field.value) === 0)) field.value = row[key];
+    }
+    if ($('#form-category').value === '其他费用') $('#form-category').value = row.category;
+    editing = row;
+    $('#ocr-text').textContent = row.ocr_text || '暂无识别文本'; $('#ocr-error').textContent = row.ocr_error;
+    $('#form-error').textContent = ''; toast('已补充缺失信息，请对照原件核对'); await refresh();
+  } catch (e) { $('#form-error').textContent = e.message; }
+  finally {
+    recognizing = false;
+    $('#rerecognize').disabled = $('#confirm-invoice').disabled = $('#save-draft').disabled = false;
+  }
+};
+$('#editor').addEventListener('cancel', e => {if(saving || recognizing) e.preventDefault();});
 $('#review-pending').onclick=()=>{navigate('invoices');$('#status').value='pending';page=1;refresh();};
 $('#prev').onclick=()=>{page--;renderTable();}; $('#next').onclick=()=>{page++;renderTable();};
 for(const id of ['currency','status','category','sort','start','end']) $('#'+id).onchange=()=>{page=1;refresh();};

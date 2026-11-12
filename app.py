@@ -11,6 +11,8 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+import fitz
+
 from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -26,7 +28,7 @@ DATA.mkdir(parents=True, exist_ok=True)
 PASSWORD = os.environ.get('APP_PASSWORD', '')
 security = HTTPBasic(auto_error=False)
 CATEGORIES = ['办公用品', '软件服务', '交通出行', '餐饮招待', '差旅住宿', '日常采购', '其他费用']
-CURRENCIES = ['CAD', 'CNY', 'USD', 'EUR', 'GBP', 'HKD']
+CURRENCIES = ['CAD']
 
 
 def authenticate(credentials: HTTPBasicCredentials | None = Depends(security)):
@@ -57,6 +59,8 @@ with db() as conn:
         file_name TEXT NOT NULL DEFAULT '', file_path TEXT NOT NULL DEFAULT '',
         file_hash TEXT UNIQUE, ocr_text TEXT NOT NULL DEFAULT '', ocr_error TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL)''')
+    # This ledger contains CAD invoices only; correct previously inferred currency labels.
+    conn.execute("UPDATE invoices SET currency='CAD' WHERE currency != 'CAD'")
 
 
 @app.middleware('http')
@@ -211,9 +215,60 @@ def delete(identifier: str):
 def original(identifier: str):
     with db() as conn:
         row = conn.execute('SELECT file_path FROM invoices WHERE id=?', (identifier,)).fetchone()
+    if not row or not row['file_path'] or not (DATA / 'files' / row['file_path']).is_file():
+        raise HTTPException(404, '没有原始附件')
+    return FileResponse(DATA / 'files' / row['file_path'], content_disposition_type='inline')
+
+
+@app.get('/api/files/{identifier}/preview')
+def preview(identifier: str, page: int = 1):
+    with db() as conn:
+        row = conn.execute('SELECT file_path FROM invoices WHERE id=?', (identifier,)).fetchone()
     if not row or not row['file_path']:
         raise HTTPException(404, '没有原始附件')
-    return FileResponse(DATA / 'files' / row['file_path'])
+    path = DATA / 'files' / row['file_path']
+    if not path.is_file():
+        raise HTTPException(404, '原始附件不存在')
+    if path.suffix != '.pdf':
+        return FileResponse(path)
+    try:
+        with fitz.open(path) as doc:
+            if not 1 <= page <= len(doc):
+                raise HTTPException(400, '页码无效')
+            content = doc[page-1].get_pixmap(dpi=120).tobytes('png')
+            return Response(content, media_type='image/png', headers={'X-Page-Count': str(len(doc))})
+    except (RuntimeError, ValueError):
+        raise HTTPException(422, 'PDF 无法预览，请打开原件查看')
+
+
+@app.post('/api/invoices/{identifier}/recognize')
+async def rerecognize(identifier: str):
+    with db() as conn:
+        row = conn.execute('SELECT * FROM invoices WHERE id=?', (identifier,)).fetchone()
+    if not row or not row['file_path']:
+        raise HTTPException(404, '没有可识别的原始附件')
+    if row['status'] == 'confirmed':
+        raise HTTPException(400, '请先保存为待核对，再重新识别')
+    try:
+        text = await run_in_threadpool(recognize, DATA / 'files' / row['file_path'])
+    except Exception as exc:
+        raise HTTPException(422, str(exc) if isinstance(exc, ValueError) else '无法重新识别，请检查原件')
+    fields = extract(text)
+    cents = int(Decimal(fields.pop('amount') or '0') * 100)
+    fields.update(amount_cents=cents if 0 <= cents <= 999_999_999_99 else 0, ocr_text=str(text), ocr_error='')
+    # Preserve fields already reviewed or entered by the user. Fill only missing values.
+    with db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        current = conn.execute('SELECT * FROM invoices WHERE id=?', (identifier,)).fetchone()
+        if not current or current['status'] != 'pending':
+            raise HTTPException(409, '记录状态已改变，请重新打开')
+        changes = {k: v for k, v in fields.items() if k in {'ocr_text', 'ocr_error'} or
+                   (not current[k] or (k == 'category' and current[k] == '其他费用'))}
+        changed = conn.execute('UPDATE invoices SET ' + ','.join(k+'=?' for k in changes) +
+                              " WHERE id=? AND status='pending'", [*changes.values(), identifier])
+        if not changed.rowcount:
+            raise HTTPException(409, '记录状态已改变，请重新打开')
+        return public(conn.execute('SELECT * FROM invoices WHERE id=?', (identifier,)).fetchone())
 
 
 @app.get('/api/reports')
